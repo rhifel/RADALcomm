@@ -77,7 +77,7 @@ void oledShowTimeDate() {
     oled.clearDisplay();
 
     if (!gps.time.isValid() || !gps.date.isValid()) {
-        oledPrintCenterY("GPS LOCKING...", 28, 1);
+        oledPrintCenterY("ACQUIRING", 28, 2);
         oled.display();
         return;
     }
@@ -141,9 +141,9 @@ void oledShowCoordinates(){
 
 void oledShowLegend(){
     oled.clearDisplay();
-    oledPrintAt("RED   [!] EMERGENCY",  6, 18);
-    oledPrintAt("GREEN [#] SAFE",       6, 32);
-    oledPrintAt("BLUE  [+] SUPPLY",     6, 46);
+    oledPrintAt("RED   [!] ALERT",  6, 18);
+    oledPrintAt("GREEN [#] SAFE",   6, 32);
+    oledPrintAt("BLUE  [+] AID",    6, 46);
     oled.display();
 }
 
@@ -193,15 +193,31 @@ bool waitForAck(payload_t pkt, uint16_t timeout_ms){
 
 bool sendSOS(uint8_t status){
     payload_t pkt;
+
+    pkt.year  = gps.date.isValid() ? gps.date.year() : 0;
+    pkt.month = gps.date.isValid() ? gps.date.month() : 0;
+    pkt.day   = gps.date.isValid() ? gps.date.day() : 0;
+
+    pkt.timestamp_utc = gps.time.isValid() ? 
+                        gps.time.hour() * 3600 + 
+                        gps.time.minute() * 60 + 
+                        gps.time.second() : 0;
+
     pkt.type = PKT_STATUS;
     pkt.handheld_id = H_ID;
     pkt.tower_id = 0;
 
-    pkt.latitude  = gps.location.isValid() ? (int32_t)(gps.location.lat()*1e7) : 0;
-    pkt.longitude = gps.location.isValid() ? (int32_t)(gps.location.lng()*1e7) : 0;
+    pkt.latitude  = gps.location.isValid() ? 
+                    (int32_t)(gps.location.lat()*1e7) : 0;
+
+    pkt.longitude = gps.location.isValid() ? 
+                    (int32_t)(gps.location.lng()*1e7) : 0;
 
     pkt.status = status;
     pkt.msg_id = msg_counter++;
+
+    // added for the PKT_RESPONSE
+    pkt.response_code = 0;
 
     radio.stopListening();
     bool ok = radio.write(&pkt,sizeof(pkt));
@@ -224,14 +240,21 @@ void setup() {
     pinMode(BUTTON_B, INPUT_PULLUP);
     pinMode(LED_G, OUTPUT);
 
-    Serial.println("Handheld Booting");
-    delay(500);
-
+    oled.clearDisplay();
+    oledPrintCenter("BOOTING...", 2, true);
+    oled.display();
+    delay(700);
+    
+    oled.clearDisplay();
     if(!radio.begin()){
-        Serial.println("NRF FAIL");
+        oledPrintCenter("NRF FAIL", 2, true); 
+        oled.display();
         while(1);
-    } else Serial.println("NRF OK");
-    delay(500);
+    } else {
+        oledPrintCenter("NRF OK", 2, true); 
+        oled.display();
+        delay(700);
+    }
 
     // LED flash to indicate ready
     for(int i = 0; i < 4; i++){ 
@@ -250,7 +273,10 @@ void setup() {
     radio.openReadingPipe(1,HND_ADDR);
     radio.stopListening();
 
-    Serial.println("Handheld Ready");
+    oled.clearDisplay();
+    oledPrintCenter("ACTIVE", 2, true);
+    oled.display();
+    delay(700);
 }
 
 // Main Loop 
@@ -269,12 +295,14 @@ void loop() {
 
             bool ok = sendSOS(statuses[i]);
 
+            oled.clearDisplay();
             oledPrintCenter(
-                statuses[i] == STATUS_RED   ? "[!] EMERGENCY" :
+                statuses[i] == STATUS_RED   ? "[!] ALERT" :
                 statuses[i] == STATUS_GREEN ? "[#] SAFE" :
-                                              "[+] SUPPLY",
+                                              "[+] AID",
                 2, true
             );
+            oled.display();
 
             indicateLED(ok);
 

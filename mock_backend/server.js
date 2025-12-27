@@ -3,11 +3,14 @@ const mongoose = require("mongoose");
 
 const app = express();
 app.use(express.json());
+require('dotenv').config();   
 
-mongoose.connect("mongodb").then(()=>console.log("Connected to MongoDb"));
+mongoose.connect(mongodb).then(()=>console.log("Connected to MongoDb"));
 
 const Event = mongoose.model("Event", new mongoose.Schema({
+  latency_ms: String,
   type: Number,
+  type_str: String,
   handheld_id: Number,
   tower_id: Number,
   lat: Number,
@@ -15,6 +18,8 @@ const Event = mongoose.model("Event", new mongoose.Schema({
   status: Number,
   status_str: String,
   msg_id: Number,
+  response_code: Number,
+  response_bool: Boolean,
   createdAt: { type: Date, default: Date.now }
 }));
 

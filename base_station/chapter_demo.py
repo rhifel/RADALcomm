@@ -1,7 +1,9 @@
 import time
 import struct
 import requests
+import json
 from collections import deque
+from datetime import datetime, timezone, timedelta
 from pyrf24 import RF24, RF24_PA_MAX, RF24_250KBPS
 
 # NRF24 object and pins
@@ -13,15 +15,21 @@ BASE_ADDR = b"BSE01"
 
 
 # type, handheld_id, tower_id, lat, lon, status, msg_id
-PAYLOAD_FMT = "<BBBiiBH"  
+PAYLOAD_FMT = "<HBBIBBBiiBHB"  
 
 # ack_ok, msg_id
 ACK_FMT = "<BH"            
 
 # status mapping
-STATUS_MAP = {1: "EMERGENCY / CRITICAL",
-              2: "SAFE / OK",
-              3: "NEED FOOD / WATER / MEDICAL SUPPLIES"}
+STATUS_MAP = {1: "ALERT",
+              2: "SAFE",
+              3: "AID"}
+
+MESSAGE_RECEIVED = {0: False,
+                    1: True,}
+
+PACKET_TYPE = {1: "STATUS",
+               2: "RESPONSE"}
 
 # BACKEND_URL = "http://ip:5000/api/events"
 BACKEND_URL = "http://ip:5000/api/events"
@@ -76,21 +84,36 @@ def process_packet():
         raw = radio.read(payload_size)
         pkt = struct.unpack(PAYLOAD_FMT, raw)
 
+        # reconstruct sent time
+        sent_time = datetime(pkt[0], pkt[1], pkt[2], 0, 0, 0, tzinfo=timezone.utc) 
+        sent_time += timedelta(seconds=pkt[3])
+        
+        #current time in UTC
+        arricval_time = datetime.now(timezone.utc)
+
+        # calculate latency in seconds
+        latency_sec = (arricval_time - sent_time).total_seconds()
+
         # decode message
         msg = {
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "type": pkt[0],
-            "handheld_id": pkt[1],
-            "tower_id": pkt[2],
-            "lat": pkt[3] / 1e7,
-            "lon": pkt[4] / 1e7,
-            "status": pkt[5],
-            "status_str": STATUS_MAP.get(pkt[5], "UNKNOWN"),
-            "msg_id": pkt[6]
+            "latency_ms": str(round(latency_sec * 1000, 2)) + " ms",
+            "type": pkt[4],
+            "type_str": PACKET_TYPE.get(pkt[4], "UNKNOWN"),
+            "handheld_id": pkt[5],
+            "tower_id": pkt[6],
+            "lat": pkt[7] / 1e7,
+            "lon": pkt[8] / 1e7,
+            "status": pkt[9],
+            "status_str": STATUS_MAP.get(pkt[9], "UNKNOWN"),
+            "msg_id": pkt[10],
+            "response_code": pkt[11],
+            "response_bool": MESSAGE_RECEIVED.get(pkt[11], "UNKNOWN"),
         }
 
         print("\n--- MESSAGE RECEIVED ---")
-        print(msg)
+        # print(msg)
+        json_msg = json.dumps(msg, indent=4)
+        print(json_msg)
 
         # queue message to backend
         msg_queue.append(msg)
