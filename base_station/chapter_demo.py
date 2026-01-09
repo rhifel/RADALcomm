@@ -110,18 +110,29 @@ def process_packet():
             "response_bool": MESSAGE_RECEIVED.get(pkt[11], "UNKNOWN"),
         }
 
-        print("\n--- MESSAGE RECEIVED ---")
-        # print(msg)
-        json_msg = json.dumps(msg, indent=4)
-        print(json_msg)
+        latest_msg = msg
 
-        # queue message to backend
+        # print only latest
+        #print("\n--- MESSAGE RECEIVED ---")
+        #print(json.dumps(latest_msg, indent=4))
+
+        # append to queue
         msg_queue.append(msg)
 
-        # ACK back to tower
+        # log to file
+        with open("messages_log.json", "a") as f:
+            f.write(json.dumps(msg, indent=4) + "\n")
+            
+
+        # log the latest message separately
+        with open("latest_message.json", "w") as f:
+            json.dump(latest_msg, f, indent=4)
+
+        # send ACK to tower
         ack = struct.pack(ACK_FMT, 1, msg["msg_id"])
         radio.writeAckPayload(1, ack)
         print(f"ACK sent for msg_id {msg['msg_id']}")
+
 
 # Process queued messages
 def process_queue():
