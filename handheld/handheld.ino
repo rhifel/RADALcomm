@@ -82,6 +82,17 @@ uint8_t pendingStatus = 0;
 uint32_t confirmTimeout = 0;
 const uint16_t CONFIRM_WINDOW_MS = 5000; // 5 seconds to confirm button send
 
+// state lock
+bool waitingForResponse = false;
+uint8_t currentStatus = 0;
+unsigned long sendTime = 0;
+const unsigned long LOCK_TIMEOUT = 10000; // 10 secs
+
+// priority function 
+bool isHigerPriority(uint8_t newStatus, uint8_t currentStatus){
+    return newStatus > currentStatus;
+}
+
 // OLED helper functions
 void oledPrintAt(const String &msg, int x, int y, int textSize = 1, bool clear = false){
     if(clear) oled.clearDisplay();
@@ -129,8 +140,11 @@ const char* statusToMsgResp(uint8_t r){
 
 // enums for statemachine homescreen
 // TDC is Time, Date, and Coordinates
-// LSR is Last Sent and Received
-enum HomeScreenState {SCREEN_TDC, SCREEN_LSR};
+// LS and LR are Last Sent and Received
+enum HomeScreenState { // being replace SCREEN_LSR 
+    SCREEN_TDC, 
+    SCREEN_LR, 
+    SCREEN_LS}; 
 HomeScreenState homeState = SCREEN_TDC; 
 
 const uint8_t daysInMonth[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
@@ -199,12 +213,12 @@ void oledShowTDC() {
     oled.display();
 }
 
-void oledShowLSR() {
+//  SECTION 1: LAST SENT 
+void oledShowLS() {
     oled.clearDisplay();
     char timeBuf[16];
     char idBuf[8];
-
-    //  SECTION 1: LAST SENT 
+    
     oledPrintAt("LAST SENT:", 0, 0, 1);
 
     if (LastSentPkt && lastSentTimeValid) {
@@ -222,24 +236,28 @@ void oledShowLSR() {
         if (hour12 == 0) hour12 = 12;
 
         sprintf(timeBuf, "%02d:%02d:%02d%s", hour12, minute, second, ampm);
-        oledPrintAt(timeBuf, 62, 0, 1); 
+        oledPrintCenterY(timeBuf, 10, 1); 
 
-        // Large Status
-        oledPrintAt(statusToStr(lastSentStatus), 0, 12, 2);
+        // status
+        oledPrintCenterY(statusToStr(lastSentStatus), 25, 2);
 
-        // ID Label and Value
-        oledPrintAt("ID:", 85, 12, 1);
-        sprintf(idBuf, "%d", lastSentMsgID);
-        oledPrintAt(idBuf, 105, 12, 2);
+        // id label and value
+        sprintf(idBuf, "ID:%d", lastSentMsgID);
+        oledPrintCenterY(idBuf, 50, 1);
     } else {
-        oledPrintAt("NO DATA", 0, 12, 2);
+        oledPrintCenter("NO DATA", 2, true);
     }
+    
+    oled.display();
+}
 
-    // Divider Line at middle
-    oled.drawFastHLine(0, 31, 128, SH110X_WHITE);
-
-    //  SECTION 2: LAST RECV 
-    oledPrintAt("LAST RECV:", 0, 34, 1);
+//  SECTION 2: LAST RECV 
+void oledShowLR() {
+    oled.clearDisplay();
+    char timeBuf[16];
+    char idBuf[8];
+    
+    oledPrintAt("LAST RECV", 0, 0, 1);
 
     if (lastRecvResponse && lastRecvTimeValid) {
         uint8_t hour   = lastRecvHour;
@@ -255,14 +273,15 @@ void oledShowLSR() {
         uint8_t hour12 = hour % 12;
         if (hour12 == 0) hour12 = 12;
 
-        sprintf(timeBuf, "%02d:%02d:%02d%s", hour12, minute, second, ampm);
-        oledPrintAt(timeBuf, 62, 34, 1);
+        sprintf(timeBuf, "%02d:%02d:%02d %s", hour12, minute, second, ampm);
+        oledPrintCenterY(timeBuf, 10, 1);
 
-        oledPrintAt("MSG_ID:", 0, 48, 1);
-        sprintf(idBuf, "%d", lastRecvMsgID);
-        oledPrintAt(idBuf, 45, 48, 1);
-        
-        oledPrintAt(statusToMsgResp(lastRecvStatus), 0, 56, 1);
+        // response message
+        oledPrintCenterY(statusToMsgResp(lastRecvStatus), 25, 2);
+
+        // id
+        sprintf(idBuf, "ID:%d", lastRecvMsgID);
+        oledPrintCenterY(idBuf, 50, 1);
     } else {
         oledPrintAt("NONE RECEIVED", 0, 48, 1);
     }
@@ -273,7 +292,8 @@ void oledShowLSR() {
 // helper for switching screens
 void refreshCurrentScreen() {
     if (homeState == SCREEN_TDC) oledShowTDC();
-    else oledShowLSR();
+    else if (homeState == SCREEN_LS) oledShowLS();
+    else if (homeState == SCREEN_LR) oledShowLR();
 }
 
 void handleScreenButton(uint32_t now) {
@@ -283,11 +303,11 @@ void handleScreenButton(uint32_t now) {
 
         lastScreenPressTime = now;
 
-        homeState = (homeState == SCREEN_TDC) ? SCREEN_LSR : SCREEN_TDC;
+        homeState = (HomeScreenState)((homeState + 1) % 3);
         refreshCurrentScreen();
     }
     
-    lastScButtonState == currentButtonState;
+    lastScButtonState = currentButtonState;
 }
 
  
@@ -302,7 +322,6 @@ void blinkLED(uint8_t pin, uint8_t times = 1, uint16_t delayMs = 100){
 
 // Check for incoming response from base
 void checkForResponse(){
-    char idBuf[8];
     uint8_t pipe;
     if(radio.available(&pipe) && pipe == 1){
         uint8_t payloadSize = radio.getDynamicPayloadSize(); 
@@ -315,53 +334,51 @@ void checkForResponse(){
         payload_t resp; //response 
         radio.read(&resp, sizeof(resp));
 
-        if(resp.type != PKT_RESPONSE || resp.handheld_id != H_ID) return;
+        // Validate packet
+        if (resp.type != PKT_RESPONSE) return;
+        if (resp.handheld_id != H_ID) return;
+        if (resp.msg_id != lastSentMsgID) return;
         
+        // receivedTime snapshot
         if(gps.time.isValid() && gps.date.isValid()){
-            resp.year       = gps.date.year();
-            resp.month      = gps.date.month();
-            resp.day        = gps.date.day();
-            resp.daySeconds = gps.time.hour() * 3600 + gps.time.minute() * 60 + gps.time.second();
+        lastRecvHour   = gps.time.hour();
+        lastRecvMinute = gps.time.minute();
+        lastRecvSecond = gps.time.second();
+
+        lastRecvDay    = gps.date.day();
+        lastRecvMonth  = gps.date.month();
+        lastRecvYear   = gps.date.year();
+
+        lastRecvTimeValid = true;
+        } else {
+            lastRecvTimeValid = false;
         }
 
         lastRecvResponse = true;
         lastRecvMsgID = resp.msg_id;
-        lastRecvStatus = resp.response_code; // 1 = alertMsgResp, 2 = aidMsgResp, 3 = safeMsgResp 
+        lastRecvStatus = resp.response_code;  
 
-        // receivedTime snapshot
-        if(resp.year != 0){
-            // Using time sent by the Dashboard/Base
-            lastRecvHour   = (uint8_t)(resp.daySeconds / 3600);
-            lastRecvMinute = (uint8_t)((resp.daySeconds / 60) % 60);
-            lastRecvSecond = (uint8_t)(resp.daySeconds % 60);
-            lastRecvDay    = resp.day;
-            lastRecvMonth  = resp.month;
-            lastRecvYear   = resp.year;
-            lastRecvTimeValid = true;
-    }
+        waitingForResponse = false;
 
         showRecvPopup = true;
         recvPopupStart = millis();
         
         blinkLED(LED_G, 1, 1000);
-        drawResponsePopup(resp.msg_id, resp.response_code);
+        drawResponsePopup(resp.msg_id);
     }
 }
 
 // recv popup UI
-void drawResponsePopup(uint16_t id, uint8_t status) {
-    char idBuf[8];
+void drawResponsePopup(uint16_t id) {
+    char idBuf[10];
 
     oled.clearDisplay();
-    oledPrintAt("MESSAGE RECEIVED", 0, 0, 1);
-    oled.drawFastHLine(0, 10, 128, 1);
-    
-    oledPrintAt("ID:", 0, 15, 1);
-    sprintf(idBuf, "%d", id);
-    oledPrintAt(idBuf, 30, 15, 2); 
-    
-    oledPrintAt("STATUS:", 0, 35, 1);
-    oledPrintAt(statusToMsgResp(status), 0, 45, 1);
+
+    oledPrintCenter("NEW MESSAGE", 2, true);
+
+    sprintf(idBuf, "ID:%d", id);
+    oledPrintCenterY(idBuf, 40, 1);
+
     oled.display();
 }
 
@@ -422,7 +439,26 @@ void handleStatusButtons(uint32_t now) {
                 if(statuses[i] == pendingStatus){ 
                     // match, turn off LED, send packet
                     digitalWrite(LED_G, LOW);
-                    sendSOS(pendingStatus);
+                    //sendSOS(pendingStatus);
+                    if(waitingForResponse){
+                        if(!isHigerPriority(pendingStatus, currentStatus))
+                        oled.clearDisplay();
+                        int remaining = (LOCK_TIMEOUT - (now - sendTime)) / 1000;
+                        oledPrintCenter("PLEASE WAIT", 1, true);
+                        oledPrintCenterY("RETRY IN " + String(remaining) + "s", 30, 1);
+                        oled.display();
+                        delay(800);
+                        refreshCurrentScreen();
+                        isWaitingConfirm = false;
+                        return;
+                    }
+                    bool success = sendSOS(pendingStatus);
+
+                    if(success){
+                        waitingForResponse = true;
+                        currentStatus = pendingStatus;
+                        sendTime = now;
+                    }
 
                     oled.clearDisplay();
                     oledPrintCenterY("SENDING...", 10, 1);
@@ -528,12 +564,15 @@ void loop() {
 
     // check responses from base
     checkForResponse();
+    if(waitingForResponse && (now - sendTime > LOCK_TIMEOUT)){
+        waitingForResponse = false;
+    }
     // check for button presses
     handleScreenButton(now); // screen rotation button
     handleStatusButtons(now);
 
     // popup transitions when receiving
-    if (showRecvPopup){
+    if(showRecvPopup){
         // If 3 seconds have passed, 
         // close the popup and return to main screen
         if (now - recvPopupStart > 3000){ 
