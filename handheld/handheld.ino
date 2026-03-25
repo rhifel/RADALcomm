@@ -23,8 +23,8 @@ constexpr uint8_t TX_PIN = 16;
 constexpr uint8_t CE_PIN  = 4;
 constexpr uint8_t CSN_PIN = 5;
 RF24 radio(CE_PIN, CSN_PIN);
-const uint8_t HND_ADDR[6] = "address";
-const uint8_t BSE_ADDR[6] = "address";
+const uint8_t HND_ADDR[6] = "HND01";
+const uint8_t BSE_ADDR[6] = "BSE01";
 constexpr uint8_t H_ID = 1;
 
 // buttons and led pins
@@ -42,12 +42,12 @@ const size_t numButtons  = sizeof(buttons)/sizeof(buttons[0]);
 // variable helpers
 static uint16_t msg_counter = 1; 
 const uint16_t DEBOUNCE_MS = 200;
-// separate debounce times for the buttons
-static uint32_t lastPressTime[numButtons] = {0,0,0}; 
-static uint32_t lastScreenPressTime = 0;
+uint8_t lastScButtonState = HIGH; //screen button state
+uint8_t lastStButtonState[numButtons] = {HIGH,HIGH,HIGH}; //status button state
 
-// link-level base auto-ack 
-bool receivedLinkAck = false;
+// separate debounce times for the buttons
+static uint32_t lastPressTime[numButtons] = {0,0,0}; // status buttons
+static uint32_t lastScreenPressTime = 0;
 
 // reponse from base for LAST RECV and checkForResponse
 bool lastRecvResponse = false;
@@ -119,9 +119,10 @@ const char* statusToStr(uint8_t s) {
 
 const char* statusToMsgResp(uint8_t r){
     switch(r){
-        case 1: return "RESCUE ON THE WAY";
-        case 2: return "FOOD & WATER INCOMING";
-        case 3: return "CHECK-UP SCHEDULED";
+        case 1: return "ACKNOWLEDGED";
+        case 2: return "HELP_EN_ROUTE";
+        case 3: return "STANDBY";
+        case 4: return "UNABLE_TO_RESPOND";
         default: return "UNKNOWN";
     }
 }
@@ -140,7 +141,7 @@ bool isLeapYear(uint16_t y) {
 
 void applyTimeOffset(uint8_t &hour, uint8_t &day, uint8_t &month, uint16_t &year, uint8_t offset) {
     hour += offset;
-    if (hour >= 24) {
+    while(hour >= 24){
         hour -= 24;
         day++;
         
@@ -276,16 +277,20 @@ void refreshCurrentScreen() {
 }
 
 void handleScreenButton(uint32_t now) {
-    if (digitalRead(BUTTON_SC) == LOW && (now - lastScreenPressTime > DEBOUNCE_MS)) {
+    uint8_t currentButtonState = digitalRead(BUTTON_SC);
+
+    if (currentButtonState == LOW && lastScButtonState == HIGH && (now - lastScreenPressTime > DEBOUNCE_MS)) {
 
         lastScreenPressTime = now;
 
         homeState = (homeState == SCREEN_TDC) ? SCREEN_LSR : SCREEN_TDC;
         refreshCurrentScreen();
     }
+    
+    lastScButtonState == currentButtonState;
 }
 
-// led blink helper fucntion
+ 
 void blinkLED(uint8_t pin, uint8_t times = 1, uint16_t delayMs = 100){
     for(uint8_t i = 0; i < times; i++){
         digitalWrite(pin, HIGH);
@@ -301,33 +306,44 @@ void checkForResponse(){
     uint8_t pipe;
     if(radio.available(&pipe) && pipe == 1){
         uint8_t payloadSize = radio.getDynamicPayloadSize(); 
+        // trash invalic packet size
         if(payloadSize != sizeof(payload_t)){
-            uint8_t dummy[payloadSize];
-            radio.read(dummy, payloadSize);
+            radio.flush_rx();
             return;
         }
+
         payload_t resp; //response 
         radio.read(&resp, sizeof(resp));
 
         if(resp.type != PKT_RESPONSE || resp.handheld_id != H_ID) return;
+        
+        if(gps.time.isValid() && gps.date.isValid()){
+            resp.year       = gps.date.year();
+            resp.month      = gps.date.month();
+            resp.day        = gps.date.day();
+            resp.daySeconds = gps.time.hour() * 3600 + gps.time.minute() * 60 + gps.time.second();
+        }
 
         lastRecvResponse = true;
         lastRecvMsgID = resp.msg_id;
         lastRecvStatus = resp.response_code; // 1 = alertMsgResp, 2 = aidMsgResp, 3 = safeMsgResp 
-        
-        if(gps.time.isValid() && gps.date.isValid()){
-            lastRecvHour   = gps.time.hour();
-            lastRecvMinute = gps.time.minute();
-            lastRecvSecond = gps.time.second();
-            lastRecvDay    = gps.date.day();
-            lastRecvMonth  = gps.date.month();
-            lastRecvYear   = gps.date.year();
+
+        // receivedTime snapshot
+        if(resp.year != 0){
+            // Using time sent by the Dashboard/Base
+            lastRecvHour   = (uint8_t)(resp.daySeconds / 3600);
+            lastRecvMinute = (uint8_t)((resp.daySeconds / 60) % 60);
+            lastRecvSecond = (uint8_t)(resp.daySeconds % 60);
+            lastRecvDay    = resp.day;
+            lastRecvMonth  = resp.month;
+            lastRecvYear   = resp.year;
             lastRecvTimeValid = true;
     }
 
         showRecvPopup = true;
         recvPopupStart = millis();
         
+        blinkLED(LED_G, 1, 1000);
         drawResponsePopup(resp.msg_id, resp.response_code);
     }
 }
@@ -335,6 +351,7 @@ void checkForResponse(){
 // recv popup UI
 void drawResponsePopup(uint16_t id, uint8_t status) {
     char idBuf[8];
+
     oled.clearDisplay();
     oledPrintAt("MESSAGE RECEIVED", 0, 0, 1);
     oled.drawFastHLine(0, 10, 128, 1);
@@ -348,87 +365,63 @@ void drawResponsePopup(uint16_t id, uint8_t status) {
     oled.display();
 }
 
-// rf wait for ack
-bool waitForAck(payload_t pkt, uint16_t timeout_ms){
-    uint32_t start = millis();
-
-    while(millis() - start < timeout_ms){
-        if(radio.isAckPayloadAvailable()){
-            uint8_t payloadSize = radio.getDynamicPayloadSize();
-            if(payloadSize == sizeof(ack_t)){
-                ack_t ack;
-                radio.read(&ack,sizeof(ack));
-                if (ack.ack_ok && ack.msg_id == lastSentMsgID) {
-                    receivedLinkAck = true;
-                    if(receivedLinkAck) blinkLED(LED_G, 2, 200);
-                    return true;
-                }
-            }
-        }
-        delay(1);
-    }
-    return false;
-}
-
 bool sendSOS(uint8_t status){
-    lastSentStatus = status;   // ALERT / SAFE / AID
-    LastSentPkt = true;
-    receivedLinkAck = false;
-    
-    payload_t pkt;
+    if(!gps.location.isValid()) return false;
 
-    pkt.year  = gps.date.isValid() ? gps.date.year() : 0;
-    pkt.month = gps.date.isValid() ? gps.date.month() : 0;
-    pkt.day   = gps.date.isValid() ? gps.date.day() : 0;
+    payload_t pkt = {0};
 
-    pkt.timestamp_utc = gps.time.isValid() ? 
-                        gps.time.hour() * 3600 + 
-                        gps.time.minute() * 60 + 
-                        gps.time.second() : 0;
+    pkt.year       = gps.date.year();
+    pkt.month      = gps.date.month();
+    pkt.day        = gps.date.day();
+    pkt.daySeconds = (uint32_t)gps.time.hour() * 3600 + 
+                     (uint32_t)gps.time.minute() * 60 + 
+                     (uint32_t)gps.time.second();
 
-    pkt.type = PKT_STATUS;
-    pkt.handheld_id = H_ID;
-
-    pkt.latitude  = gps.location.isValid() ? 
-                    (int32_t)(gps.location.lat()*1e7) : 0;
-
-    pkt.longitude = gps.location.isValid() ? 
-                    (int32_t)(gps.location.lng()*1e7) : 0;
-
-    pkt.status = status;
-    pkt.msg_id = msg_counter++;
-    pkt.response_code = 0;   // added for the PKT_RESPONSE
-    
-    lastSentMsgID = pkt.msg_id;
-    
-    // time snapshot
-    if(gps.time.isValid() && gps.date.isValid()){
-        lastSentHour   = gps.time.hour();
-        lastSentMinute = gps.time.minute();
-        lastSentSecond = gps.time.second();
-        lastSentDay    = gps.date.day();
-        lastSentMonth  = gps.date.month();
-        lastSentYear   = gps.date.year();
-        lastSentTimeValid = true;
-    } 
+    pkt.type            = PKT_STATUS;
+    pkt.handheld_id     = H_ID;
+    pkt.latitude        = (int32_t)(gps.location.lat()*1e7);
+    pkt.longitude       = (int32_t)(gps.location.lng()*1e7);
+    pkt.status          = status;
+    pkt.msg_id          = msg_counter++;
+    pkt.response_code   = 0;   // added for the PKT_RESPONSE
 
     radio.stopListening();
-    bool ok = radio.write(&pkt,sizeof(pkt));
+    bool success = radio.write(&pkt, sizeof(pkt));
     radio.startListening();
 
-    return ok && waitForAck(pkt,800);
+    if(success) {
+
+        lastSentStatus  = status;   // ALERT / SAFE / AID
+        LastSentPkt     = true;
+        lastSentMsgID   = pkt.msg_id;
+
+        // sentTime snapshot
+        lastSentHour   = (uint8_t)(pkt.daySeconds / 3600);
+        lastSentMinute = (uint8_t)((pkt.daySeconds / 60) % 60);
+        lastSentSecond = (uint8_t)(pkt.daySeconds % 60);
+        lastSentDay    = pkt.day;
+        lastSentMonth  = pkt.month;
+        lastSentYear   = pkt.year;
+        lastSentTimeValid = (pkt.year != 0);
+
+        blinkLED(LED_G, 4, 200);
+    }
+    
+    return success;
 }
 
-void handleUserButtons(uint32_t now) {
+void handleStatusButtons(uint32_t now) {
     for (size_t i = 0; i < numButtons; i++) {
+        uint8_t currentButtonState = digitalRead(buttons[i]);
         // check for press + debounce
-        if (digitalRead(buttons[i]) == LOW && (now - lastPressTime[i] > DEBOUNCE_MS)) {
+        if (currentButtonState == LOW && lastStButtonState[i] == HIGH && (now - lastPressTime[i] > DEBOUNCE_MS)) {
             lastPressTime[i] = now;
 
             // the 2nd press 
             if(isWaitingConfirm){
                 if(statuses[i] == pendingStatus){ 
-                    // match, send packet
+                    // match, turn off LED, send packet
+                    digitalWrite(LED_G, LOW);
                     sendSOS(pendingStatus);
 
                     oled.clearDisplay();
@@ -442,6 +435,7 @@ void handleUserButtons(uint32_t now) {
                     isWaitingConfirm = false; // reset the confirmation state
                 } else{ // user presses a different button
                     isWaitingConfirm = false;
+                    oled.clearDisplay();
                     oledPrintCenter("CANCELLED", 1, true);
                     oled.display(); 
                     delay(500);//small delay to show msg
@@ -455,14 +449,16 @@ void handleUserButtons(uint32_t now) {
                 oled.clearDisplay();
                 oledPrintCenterY("CONFIRM SEND?", 5, 1);
                 oledPrintCenterY(statusToStr(pendingStatus), 20, 2);
-                oledPrintCenterY("Press same button", 45, 1);
+                oledPrintCenterY("Press the same button", 45, 1);
                 oledPrintCenterY("to send...", 55, 1);
                 oled.display();
             }
         }
+        lastStButtonState[i] = currentButtonState;
     }
     if(isWaitingConfirm && (now - confirmTimeout > CONFIRM_WINDOW_MS)){
         isWaitingConfirm = false;
+        digitalWrite(LED_G, LOW);
         refreshCurrentScreen();
     }
 }
@@ -494,7 +490,7 @@ void setup() {
         oledPrintCenter("NRF FAIL", 2, true); 
         oled.display();
         while(1);
-    } else {
+    } else{
         oledPrintCenter("NRF OK", 2, true); 
         oled.display();
         delay(700);
@@ -504,11 +500,13 @@ void setup() {
     blinkLED(LED_G, 4, 200);
 
     radio.enableDynamicPayloads();
-    radio.enableAckPayload();
+    radio.disableAckPayload();
     radio.setChannel(100);
     radio.setDataRate(RF24_250KBPS);
     radio.setPALevel(RF24_PA_HIGH);
-    radio.setRetries(5,15);
+    radio.setAutoAck(true);
+    radio.setCRCLength(RF24_CRC_16);
+    radio.setRetries(15,15);
     radio.openWritingPipe(BSE_ADDR);
     radio.openReadingPipe(1, HND_ADDR);
     radio.startListening();
@@ -530,10 +528,9 @@ void loop() {
 
     // check responses from base
     checkForResponse();
-
     // check for button presses
     handleScreenButton(now); // screen rotation button
-    handleUserButtons(now);
+    handleStatusButtons(now);
 
     // popup transitions when receiving
     if (showRecvPopup){
@@ -543,15 +540,17 @@ void loop() {
             showRecvPopup = false;
             refreshCurrentScreen();
         }
-    } 
+    }
+
     else if(isWaitingConfirm){
-    // let handleUserButtons control the screen
-        static uint32_t lastFlash = 0;
-        if (now - lastFlash > 1000) { // flash every 1 second
-            lastFlash = now;
-            blinkLED(LED_G, 1, 50); // Short flash
+        // LED ON for 100ms, OFF for 400ms 
+        if (now % 500 < 100) { 
+        digitalWrite(LED_G, HIGH);
+        } else{
+        digitalWrite(LED_G, LOW);
         }
     }
+
     else{
         static uint32_t lastRefresh = 0;
         if(now - lastRefresh > 200){

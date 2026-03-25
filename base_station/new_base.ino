@@ -35,16 +35,16 @@ void setRGB(uint8_t r, uint8_t g, uint8_t b){
   digitalWrite(LED_B, b);
 }
 
-const char* typeToStr(uint8_t t) {
-    switch (t) {
+const char* typeToStr(uint8_t type) {
+    switch (type) {
         case 1: return "PKT_STATUS";
         case 2: return "PKT_RESPONSE";
         default: return "UNKNOWN";
     }
 }
 
-const char* statusToStr(uint8_t s) {
-    switch (s) {
+const char* statusToStr(uint8_t status) {
+    switch (status) {
         case 1: return "ALERT";
         case 2: return "SAFE";
         case 3: return "AID";
@@ -52,20 +52,52 @@ const char* statusToStr(uint8_t s) {
     }
 }
 
-void handleIncomingRF(){
+const uint8_t daysInMonth[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+
+bool isLeapYear(uint16_t y) {
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+
+void applyTimeOffset(uint8_t &hour, uint8_t &day, uint8_t &month, uint16_t &year, uint8_t offset) {
+    hour += offset;
+    while(hour >= 24){
+        hour -= 24;
+        day++;
+        
+        uint8_t maxDay = daysInMonth[month - 1];
+        if (month == 2 && isLeapYear(year)) maxDay = 29;
+
+        if (day > maxDay) {
+            day = 1;
+            month++;
+            if (month > 12) {
+                month = 1;
+                year++;
+            }
+        }
+    }
+}
+
+
+void handleIncomingPackets(){
 
   uint8_t pipeNum;
   if(!radio.available(&pipeNum)) return;
 
   uint8_t payloadSize = radio.getDynamicPayloadSize();
 
-  if(payloadSize != sizeof(payload_t)) return;
+  if(payloadSize == 0 || payloadSize > 32) {
+    radio.flush_rx();
+    return;
+}
+
+  if(payloadSize != sizeof(payload_t)) {
+    radio.flush_rx();
+    return;
+  }
 
   payload_t pkt;
-  radio.read(&pkt, sizeof(pkt));
-
-  uint32_t arrival_time_ms = millis();
-  uint32_t latency = arrival_time_ms - pkt.sent_time_ms; // rf transmission time
+  radio.read(&pkt, sizeof(pkt)); // auto acknowledgement
 
   if(pkt.type != PKT_STATUS) return;
 
@@ -79,34 +111,47 @@ void handleIncomingRF(){
   float lat = pkt.latitude / 1e7;
   float lon = pkt.longitude / 1e7;
 
-  char latencyStr[16];
-  snprintf(latencyStr, sizeof(latencyStr), "%lu ms", latency);
+  uint8_t hour = (uint8_t)(pkt.daySeconds / 3600);
+  uint8_t minute = (uint8_t)((pkt.daySeconds / 60) % 60);
+  uint8_t seconds = (uint8_t)(pkt.daySeconds % 60);
 
-  const char* type_str = typeToStr(pkt.type);
-  const char* status_str = statusToStr(pkt.status);
-  bool response_bool = false;
+  uint8_t day = pkt.day;
+  uint8_t month = pkt.month;
+  uint16_t year = pkt.year;
+
+  // UTC+8
+  applyTimeOffset(hour, day, month, year, 8);
+
+  // Convert 24-hour to 12-hour format
+  const char* ampm = (hour >= 12) ? "PM" : "AM";
+  uint8_t hour12 = hour % 12;
+  if (hour12 == 0) hour12 = 12;
+
+  char timeStamp[32]; 
+  snprintf(timeStamp, sizeof(timeStamp), "%02u/%02u/%04u - %02u:%02u:%02u %s",  
+         month,
+         day, 
+         year, 
+         hour12, minute, seconds,
+         ampm);
 
   char serialBuffer[256];
   snprintf(serialBuffer, sizeof(serialBuffer), 
-         "<%s,%u,%s,%u,%u,%.6f,%.6f,%u,%s,%u,%u,",
-         latencyStr,            
+         "<STATUS,%s,%u,%s,%u,%u,%.7f,%.7f,%u,%s,%u,%u,%d>\n",
+         timeStamp, // timestamp
          pkt.type,
-         type_str,              
+         typeToStr(pkt.type),              
          pkt.handheld_id,
-         pkt.tower_id,
+         1, // placeholder tower
          lat,                   
-         lon,                    
-         pkt.status,
-         status_str,             
+         lon,
+         pkt.status,                    
+         statusToStr(pkt.status),           
          pkt.msg_id,
-         pkt.response_code
+         pkt.response_code,
+         0 // placeholder
         );
   Serial.print(serialBuffer);
-  Serial.print(response_bool); Serial.print(">");
-
-  ack_t ack = {1, pkt.msg_id};
-  radio.writeAckPayload(pipeNum, &ack, sizeof(ack)); // send the acknowledgement to the handheld 
-  delay(2);
 }
 
 void setup() {
@@ -123,13 +168,15 @@ void setup() {
   }
 
   beepBUZZER(BUZZ, 4, 200);
-  
+
   radio.enableDynamicPayloads();
-  radio.enableAckPayload();
+  radio.disableAckPayload();
   radio.setChannel(100);
   radio.setDataRate(RF24_250KBPS);
   radio.setPALevel(RF24_PA_HIGH);
-  radio.setRetries(5, 15);
+  radio.setAutoAck(true);
+  radio.setCRCLength(RF24_CRC_16);
+  radio.setRetries(15, 15);
   radio.openWritingPipe(HND_ADDR);
   radio.openReadingPipe(1, BSE_ADDR);
   radio.startListening();
@@ -137,6 +184,6 @@ void setup() {
 
 void loop() {
 
-  handleIncomingRF();
+  handleIncomingPackets();
 
 }

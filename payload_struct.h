@@ -15,10 +15,14 @@ enum StatusCode : uint8_t {
 };
 
 struct __attribute__((packed)) payload_t {
-    uint32_t sent_time_ms; // for latency
+    uint16_t year;        // e.g., 2025
+    uint8_t  month;       // 1-12
+    uint8_t  day;         // 1-31
+    uint32_t daySeconds; // seconds since start of day (0-86399)
+
     uint8_t  type;         // PacketType
     uint8_t  handheld_id;
-    uint8_t tower_id;
+
     int32_t  latitude;     // lat * 1e7
     int32_t  longitude;    // lon * 1e7
 
@@ -27,11 +31,6 @@ struct __attribute__((packed)) payload_t {
 
     // use for packet type 2
     uint8_t response_code; // response to 1 = alert, 2 = aid, 3 = safe 
-}; // 18 bytes
-
-struct __attribute__((packed)) ack_t {
-    uint8_t  ack_ok;
-    uint16_t msg_id;
-}; // 3 bytes
+}; // 22 bytes
 
 #endif
