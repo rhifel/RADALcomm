@@ -6,11 +6,6 @@
 #include <Adafruit_SH110X.h>
 #include <TinyGPS++.h>
 
-#include "esp_wifi.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-#include "esp_bt_device.h"
-
 // oled object and variables
 constexpr uint8_t SCREEN_WIDTH  = 128;
 constexpr uint8_t SCREEN_HEIGHT = 64;
@@ -317,6 +312,7 @@ void oledShowLR() {
     oled.display();
 }
 
+
 // helper for switching screens
 void refreshCurrentScreen() {
     if (homeState == SCREEN_TDC) oledShowTDC();
@@ -546,22 +542,12 @@ void handleStatusButtons(uint32_t now) {
     }
 }
 
-void disableWireless() {
-  esp_wifi_stop();
-  esp_bluedroid_disable();
-  esp_bluedroid_deinit();
-  esp_bt_controller_disable();
-  esp_bt_controller_deinit();
-}
-
 // setup
 void setup() {
     Serial.begin(115200);
     Wire.begin();
     GPSSerial.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
     oled.begin(OLED_ADDR,true);
-
-    disableWireless();
 
     //Wire.setClock(400000);
     oled.clearDisplay();

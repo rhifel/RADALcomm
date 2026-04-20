@@ -3,11 +3,6 @@
 #include <RF24.h>
 #include "payload_struct.h"
 
-#include "esp_wifi.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-#include "esp_bt_device.h"
-
 // RGB pins
 constexpr uint8_t LED_R = 25;
 constexpr uint8_t LED_G = 26;
@@ -274,19 +269,9 @@ bool initHardware() {
   }
 }
 
-void disableWireless() {
-  esp_wifi_stop();
-  esp_bluedroid_disable();
-  esp_bluedroid_deinit();
-  esp_bt_controller_disable();
-  esp_bt_controller_deinit();
-}
-
 void setup() {
   Serial.begin(115200); 
   Serial2.begin(115200, SERIAL_8N1, SERIAL2_RX, SERIAL2_TX);
-
-  disableWireless();
 
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
